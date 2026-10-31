@@ -1,0 +1,374 @@
+-- FORKT Engine (Public Version)
+-- Replace Obstacle
+-- by sl allzzsky
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local CoreGui          = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+local COLORS = {
+    BG=Color3.fromRGB(15,15,20), HEADER=Color3.fromRGB(22,22,30),
+    CARD=Color3.fromRGB(26,26,36), ACCENT=Color3.fromRGB(120,80,255),
+    ACCENT_HV=Color3.fromRGB(140,100,255), SUCCESS=Color3.fromRGB(65,220,135),
+    DANGER=Color3.fromRGB(255,75,95), WARNING=Color3.fromRGB(255,185,65),
+    TEXT=Color3.fromRGB(255,255,255), SUB=Color3.fromRGB(160,160,175),
+    BORDER=Color3.fromRGB(45,45,65)
+}
+
+local srcList, tgtPool = {}, {}
+local selectMode, selectConn = nil, nil
+
+local function tween(obj, props, time)
+    local t=TweenService:Create(obj,TweenInfo.new(time or .2,Enum.EasingStyle.Sine,Enum.EasingDirection.Out),props)
+    t:Play(); return t
+end
+
+local function cleanupOldUI()
+    for _,svc in ipairs({"CoreGui","PlayerGui"}) do
+        pcall(function()
+            local g=game:GetService(svc)
+            local old=g:FindFirstChild("FORKTHUB_ObstacleReplacer")
+            if old then old:Destroy() end
+        end)
+    end
+end
+
+local function getSize(obj)
+    if obj:IsA("BasePart") then return obj.Size end
+    local ok,size=pcall(function() return obj:GetExtentsSize() end)
+    if ok and size then return size end
+    local INF=math.huge
+    local x0,y0,z0,x1,y1,z1=INF,INF,INF,-INF,-INF,-INF
+    for _,v in ipairs(obj:GetDescendants()) do
+        if v:IsA("BasePart") then
+            local cf,h=v.CFrame,v.Size*.5
+            for _,sx in ipairs({-1,1}) do for _,sy in ipairs({-1,1}) do for _,sz in ipairs({-1,1}) do
+                local p=cf:PointToWorldSpace(Vector3.new(sx*h.X,sy*h.Y,sz*h.Z))
+                x0,y0,z0=math.min(x0,p.X),math.min(y0,p.Y),math.min(z0,p.Z)
+                x1,y1,z1=math.max(x1,p.X),math.max(y1,p.Y),math.max(z1,p.Z)
+            end end end
+        end
+    end
+    return Vector3.new(x1-x0,y1-y0,z1-z0)
+end
+
+local function getAABBCenter(obj)
+    if obj:IsA("BasePart") then return obj.Position end
+    local INF=math.huge
+    local x0,y0,z0,x1,y1,z1=INF,INF,INF,-INF,-INF,-INF
+    for _,v in ipairs(obj:GetDescendants()) do
+        if v:IsA("BasePart") then
+            local cf,h=v.CFrame,v.Size*.5
+            for _,sx in ipairs({-1,1}) do for _,sy in ipairs({-1,1}) do for _,sz in ipairs({-1,1}) do
+                local p=cf:PointToWorldSpace(Vector3.new(sx*h.X,sy*h.Y,sz*h.Z))
+                x0,y0,z0=math.min(x0,p.X),math.min(y0,p.Y),math.min(z0,p.Z)
+                x1,y1,z1=math.max(x1,p.X),math.max(y1,p.Y),math.max(z1,p.Z)
+            end end end
+        end
+    end
+    return Vector3.new((x0+x1)*.5,(y0+y1)*.5,(z0+z1)*.5)
+end
+
+local function scaleToMatch(newObj,oldObj)
+    local oldSize,newSize=getSize(oldObj),getSize(newObj)
+    if newSize.X<.001 or newSize.Y<.001 or newSize.Z<.001 then return end
+    local sx,sy,sz=oldSize.X/newSize.X,oldSize.Y/newSize.Y,oldSize.Z/newSize.Z
+    if newObj:IsA("BasePart") then newObj.Size=oldSize; return end
+    if not (newObj:IsA("Model") or newObj:IsA("Folder")) then return end
+    if newObj:IsA("Model") then
+        local geoMean=(sx*sy*sz)^(1/3)
+        local ok=pcall(function() newObj:ScaleTo(geoMean) end)
+        if ok then
+            local after=getSize(newObj)
+            local eX=math.abs(after.X-oldSize.X)/math.max(oldSize.X,.001)
+            local eY=math.abs(after.Y-oldSize.Y)/math.max(oldSize.Y,.001)
+            local eZ=math.abs(after.Z-oldSize.Z)/math.max(oldSize.Z,.001)
+            if eX<=.12 and eY<=.12 and eZ<=.12 then return end
+            sx=oldSize.X/math.max(after.X,.001); sy=oldSize.Y/math.max(after.Y,.001); sz=oldSize.Z/math.max(after.Z,.001)
+        end
+    end
+    local okp,pivot=pcall(function() return newObj:GetPivot() end)
+    if not okp then pivot=CFrame.new(getAABBCenter(newObj)) end
+    for _,part in ipairs(newObj:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local rel=pivot:PointToObjectSpace(part.Position)
+            local newRel=Vector3.new(rel.X*sx,rel.Y*sy,rel.Z*sz)
+            part.Size=Vector3.new(part.Size.X*sx,part.Size.Y*sy,part.Size.Z*sz)
+            part.CFrame=CFrame.new(pivot:PointToWorldSpace(newRel))*(part.CFrame-part.CFrame.Position)
+        end
+    end
+end
+
+local function moveToPosition(newObj,targetCenter)
+    local shift=targetCenter-getAABBCenter(newObj)
+    if newObj:IsA("Model") then
+        local curPivot=newObj:GetPivot()
+        newObj:PivotTo(CFrame.new(curPivot.Position+shift)*(curPivot-curPivot.Position))
+    elseif newObj:IsA("BasePart") then
+        newObj.Position=newObj.Position+shift
+    else
+        for _,d in ipairs(newObj:GetDescendants()) do
+            if d:IsA("BasePart") then d.Position=d.Position+shift end
+        end
+    end
+end
+
+local function resolveObjects(obj)
+    local parent=obj.Parent
+    if parent and parent~=workspace and (parent:IsA("Model") or parent:IsA("Folder")) then
+        local pool={}
+        for _,child in ipairs(parent:GetChildren()) do
+            if child:IsA("Model") or child:IsA("BasePart") then table.insert(pool,child) end
+        end
+        if #pool>=1 then return pool,parent end
+    end
+    return {obj},nil
+end
+
+cleanupOldUI()
+
+local ScreenGui=Instance.new("ScreenGui")
+ScreenGui.Name="FORKTHUB_ObstacleReplacer"; ScreenGui.ResetOnSpawn=false
+ScreenGui.DisplayOrder=999; ScreenGui.IgnoreGuiInset=true
+local okCore=pcall(function() ScreenGui.Parent=CoreGui end)
+if not okCore or not ScreenGui.Parent then ScreenGui.Parent=LocalPlayer:WaitForChild("PlayerGui") end
+
+local Main=Instance.new("Frame",ScreenGui)
+Main.Name="Main"; Main.AnchorPoint=Vector2.new(.5,.5)
+Main.Size=UDim2.new(.9,0,.75,0); Main.Position=UDim2.new(.5,0,.5,0)
+Main.BackgroundColor3=COLORS.BG; Main.BorderSizePixel=0; Main.ClipsDescendants=true
+Instance.new("UICorner",Main).CornerRadius=UDim.new(0,12)
+local sizeConstraint=Instance.new("UISizeConstraint",Main)
+sizeConstraint.MaxSize=Vector2.new(400,550); sizeConstraint.MinSize=Vector2.new(300,380)
+local mainStroke=Instance.new("UIStroke",Main); mainStroke.Color=COLORS.BORDER; mainStroke.Thickness=1.5
+
+local Header=Instance.new("Frame",Main)
+Header.Size=UDim2.new(1,0,0,45); Header.BackgroundColor3=COLORS.HEADER
+Header.BorderSizePixel=0; Header.ZIndex=5; Instance.new("UICorner",Header).CornerRadius=UDim.new(0,12)
+local headerFix=Instance.new("Frame",Header); headerFix.Size=UDim2.new(1,0,0,10)
+headerFix.AnchorPoint=Vector2.new(0,1); headerFix.Position=UDim2.new(0,0,1,0)
+headerFix.BackgroundColor3=COLORS.HEADER; headerFix.BorderSizePixel=0
+local Title=Instance.new("TextLabel",Header); Title.Size=UDim2.new(1,-90,1,0)
+Title.Position=UDim2.new(0,16,0,0); Title.BackgroundTransparency=1
+Title.Text="FORKT Engine (Public)"; Title.TextColor3=COLORS.TEXT
+Title.TextSize=14; Title.Font=Enum.Font.GothamBold; Title.TextXAlignment=Enum.TextXAlignment.Left
+
+local function makeHdrBtn(xOff,txt,textColor,hoverColor)
+    local b=Instance.new("TextButton",Header); b.Size=UDim2.new(0,40,0,45)
+    b.Position=UDim2.new(1,xOff,0,0); b.BackgroundTransparency=1
+    b.Text=txt; b.TextColor3=textColor; b.TextSize=18; b.Font=Enum.Font.GothamBold
+    b.MouseEnter:Connect(function() tween(b,{TextColor3=hoverColor}) end)
+    b.MouseLeave:Connect(function() tween(b,{TextColor3=textColor}) end)
+    return b
+end
+local MinBtn=makeHdrBtn(-85,"−",COLORS.SUB,COLORS.TEXT)
+local CloseBtn=makeHdrBtn(-40,"×",COLORS.SUB,COLORS.DANGER)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+local minimized=false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized=not minimized
+    if minimized then
+        tween(Main,{Size=UDim2.new(Main.Size.X.Scale,Main.Size.X.Offset,0,45)},.4)
+    else
+        tween(Main,{Size=UDim2.new(.9,0,.75,0)},.4)
+    end
+end)
+
+local StatusBar=Instance.new("Frame",Main)
+StatusBar.AnchorPoint=Vector2.new(0,1); StatusBar.Size=UDim2.new(1,0,0,30)
+StatusBar.Position=UDim2.new(0,0,1,0); StatusBar.BackgroundColor3=COLORS.BG
+StatusBar.BorderSizePixel=0; StatusBar.ZIndex=5
+local statusDivider=Instance.new("Frame",StatusBar); statusDivider.Size=UDim2.new(1,0,0,1)
+statusDivider.BackgroundColor3=COLORS.BORDER; statusDivider.BorderSizePixel=0
+local statusDot=Instance.new("TextLabel",StatusBar); statusDot.Size=UDim2.new(0,15,1,0)
+statusDot.Position=UDim2.new(0,12,0,0); statusDot.BackgroundTransparency=1
+statusDot.Text="●"; statusDot.TextColor3=COLORS.SUCCESS; statusDot.TextSize=10
+local statusLbl=Instance.new("TextLabel",StatusBar); statusLbl.Size=UDim2.new(1,-70,1,0)
+statusLbl.Position=UDim2.new(0,30,0,0); statusLbl.BackgroundTransparency=1
+statusLbl.Text="Whitelist removed • Public version"; statusLbl.TextColor3=COLORS.SUB
+statusLbl.TextSize=11; statusLbl.Font=Enum.Font.GothamMedium; statusLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+local Content=Instance.new("ScrollingFrame",Main)
+Content.Size=UDim2.new(1,0,1,-75); Content.Position=UDim2.new(0,0,0,45)
+Content.BackgroundTransparency=1; Content.BorderSizePixel=0; Content.ScrollBarThickness=2
+Content.ScrollBarImageColor3=COLORS.BORDER; Content.CanvasSize=UDim2.new(0,0,0,0)
+Content.AutomaticCanvasSize=Enum.AutomaticSize.Y
+local contentPad=Instance.new("UIPadding",Content)
+contentPad.PaddingTop=UDim.new(0,12); contentPad.PaddingBottom=UDim.new(0,20)
+contentPad.PaddingLeft=UDim.new(0,14); contentPad.PaddingRight=UDim.new(0,14)
+local contentList=Instance.new("UIListLayout",Content)
+contentList.SortOrder=Enum.SortOrder.LayoutOrder; contentList.Padding=UDim.new(0,12)
+contentList.HorizontalAlignment=Enum.HorizontalAlignment.Center
+
+local function setStatus(text,color)
+    statusLbl.Text=text; tween(statusLbl,{TextColor3=color or COLORS.SUB})
+end
+local function makeSectionHeader(order,text)
+    local frame=Instance.new("Frame",Content); frame.LayoutOrder=order
+    frame.Size=UDim2.new(1,0,0,18); frame.BackgroundTransparency=1
+    local lbl=Instance.new("TextLabel",frame); lbl.Size=UDim2.new(1,0,1,0)
+    lbl.BackgroundTransparency=1; lbl.Text=text; lbl.TextColor3=COLORS.SUB
+    lbl.TextSize=10; lbl.Font=Enum.Font.GothamBold; lbl.TextXAlignment=Enum.TextXAlignment.Left
+end
+local function makeCard(order,titleText,subtitleText,countText)
+    local card=Instance.new("Frame",Content); card.LayoutOrder=order
+    card.Size=UDim2.new(1,0,0,80); card.BackgroundColor3=COLORS.CARD
+    Instance.new("UICorner",card).CornerRadius=UDim.new(0,8)
+    local stroke=Instance.new("UIStroke",card); stroke.Color=COLORS.BORDER; stroke.Thickness=1
+    local pad=Instance.new("UIPadding",card)
+    pad.PaddingTop=UDim.new(0,12); pad.PaddingBottom=UDim.new(0,12)
+    pad.PaddingLeft=UDim.new(0,14); pad.PaddingRight=UDim.new(0,14)
+    local title=Instance.new("TextLabel",card); title.Size=UDim2.new(1,0,0,14)
+    title.BackgroundTransparency=1; title.Text=titleText; title.TextColor3=COLORS.SUB
+    title.TextSize=10; title.Font=Enum.Font.GothamBold; title.TextXAlignment=Enum.TextXAlignment.Left
+    local nameLbl=Instance.new("TextLabel",card); nameLbl.Size=UDim2.new(1,-85,0,20)
+    nameLbl.Position=UDim2.new(0,0,0,18); nameLbl.BackgroundTransparency=1
+    nameLbl.Text=subtitleText or "None Selected"; nameLbl.TextColor3=COLORS.TEXT
+    nameLbl.TextSize=12; nameLbl.Font=Enum.Font.GothamBold; nameLbl.TextXAlignment=Enum.TextXAlignment.Left
+    nameLbl.TextTruncate=Enum.TextTruncate.AtEnd
+    local countLbl=Instance.new("TextLabel",card); countLbl.Size=UDim2.new(1,-85,0,12)
+    countLbl.AnchorPoint=Vector2.new(0,1); countLbl.Position=UDim2.new(0,0,1,0)
+    countLbl.BackgroundTransparency=1; countLbl.Text=countText or "0 items loaded"
+    countLbl.TextColor3=COLORS.SUB; countLbl.TextSize=10; countLbl.Font=Enum.Font.GothamMedium
+    countLbl.TextXAlignment=Enum.TextXAlignment.Left
+    local selectBtn=Instance.new("TextButton",card); selectBtn.AnchorPoint=Vector2.new(1,1)
+    selectBtn.Position=UDim2.new(1,0,1,0); selectBtn.Size=UDim2.new(0,80,0,30)
+    selectBtn.BackgroundColor3=COLORS.BG; selectBtn.Text="SELECT"; selectBtn.TextColor3=COLORS.ACCENT
+    selectBtn.TextSize=10; selectBtn.Font=Enum.Font.GothamBold
+    Instance.new("UICorner",selectBtn).CornerRadius=UDim.new(0,6)
+    Instance.new("UIStroke",selectBtn).Color=COLORS.BORDER
+    selectBtn.MouseEnter:Connect(function() tween(selectBtn,{BackgroundColor3=COLORS.ACCENT,TextColor3=COLORS.TEXT}) end)
+    selectBtn.MouseLeave:Connect(function() tween(selectBtn,{BackgroundColor3=COLORS.BG,TextColor3=COLORS.ACCENT}) end)
+    return card,nameLbl,countLbl,selectBtn
+end
+
+makeSectionHeader(1,"REPLACEMENT DATA")
+makeSectionHeader(2,"SOURCE MODEL")
+local srcCard,srcNameLbl,srcCountLbl,srcBtn=makeCard(3,"SOURCE","None Selected","0 objects")
+makeSectionHeader(4,"TARGET POOL")
+local tgtCard,tgtNameLbl,tgtCountLbl,tgtBtn=makeCard(5,"TARGET","None Selected","0 variants")
+makeSectionHeader(6,"EXECUTION")
+
+local ReplaceBtn=Instance.new("TextButton",Content); ReplaceBtn.LayoutOrder=7
+ReplaceBtn.Size=UDim2.new(1,0,0,45); ReplaceBtn.BackgroundColor3=COLORS.ACCENT
+ReplaceBtn.Text="REPLACE 0 OBJECTS"; ReplaceBtn.TextColor3=COLORS.TEXT
+ReplaceBtn.TextSize=12; ReplaceBtn.Font=Enum.Font.GothamBold
+Instance.new("UICorner",ReplaceBtn).CornerRadius=UDim.new(0,8)
+ReplaceBtn.MouseEnter:Connect(function() tween(ReplaceBtn,{BackgroundColor3=COLORS.ACCENT_HV}) end)
+ReplaceBtn.MouseLeave:Connect(function() tween(ReplaceBtn,{BackgroundColor3=COLORS.ACCENT}) end)
+
+local ClearBtn=Instance.new("TextButton",Content); ClearBtn.LayoutOrder=8
+ClearBtn.Size=UDim2.new(1,0,0,25); ClearBtn.BackgroundTransparency=1
+ClearBtn.Text="Clear All Selection"; ClearBtn.TextColor3=COLORS.SUB
+ClearBtn.TextSize=11; ClearBtn.Font=Enum.Font.GothamMedium
+ClearBtn.MouseEnter:Connect(function() tween(ClearBtn,{TextColor3=COLORS.TEXT}) end)
+ClearBtn.MouseLeave:Connect(function() tween(ClearBtn,{TextColor3=COLORS.SUB}) end)
+
+local Footer=Instance.new("Frame",Content); Footer.LayoutOrder=99
+Footer.Size=UDim2.new(1,0,0,30); Footer.BackgroundTransparency=1
+local footerLbl=Instance.new("TextLabel",Footer); footerLbl.Size=UDim2.new(1,0,1,0)
+footerLbl.BackgroundTransparency=1; footerLbl.Text="© FORKT COMMUNITY TOOLS • by sl allzzsky"
+footerLbl.TextColor3=COLORS.ACCENT; footerLbl.TextTransparency=.2
+footerLbl.TextSize=11; footerLbl.Font=Enum.Font.GothamBold
+footerLbl.TextYAlignment=Enum.TextYAlignment.Bottom
+
+local function updateUI()
+    ReplaceBtn.Text="REPLACE "..tostring(#srcList).." OBJECTS"
+    srcCountLbl.Text=tostring(#srcList).." objects detected"
+    tgtCountLbl.Text=tostring(#tgtPool).." variants loaded"
+end
+
+local function stopSelect()
+    selectMode=nil
+    if selectConn then selectConn:Disconnect(); selectConn=nil end
+    srcBtn.Text="SELECT"; tgtBtn.Text="SELECT"
+end
+
+local function startSelect(mode)
+    stopSelect(); selectMode=mode
+    local btn=(mode=="source") and srcBtn or tgtBtn
+    btn.Text="CANCEL"; setStatus("Click an object in 3D world...",COLORS.WARNING)
+    selectConn=Mouse.Button1Down:Connect(function()
+        local target=Mouse.Target
+        if not target then setStatus("Missed. Click a valid part.",COLORS.DANGER); return end
+        local obj=target
+        if obj:IsA("BasePart") and obj.Parent and obj.Parent:IsA("Model") then obj=obj.Parent end
+        local pool,folder=resolveObjects(obj)
+        if mode=="source" then
+            srcList=pool
+            if folder then srcNameLbl.Text="📂 "..folder.Name; setStatus("Source folder loaded.",COLORS.SUCCESS)
+            else srcNameLbl.Text="📦 "..obj.Name; setStatus("Source object loaded.",COLORS.SUCCESS) end
+        else
+            tgtPool=pool
+            if folder then tgtNameLbl.Text="📂 "..folder.Name; setStatus("Target pool loaded.",COLORS.SUCCESS)
+            else tgtNameLbl.Text="📦 "..obj.Name; setStatus("Target object loaded.",COLORS.SUCCESS) end
+        end
+        updateUI(); stopSelect()
+    end)
+end
+
+srcBtn.MouseButton1Click:Connect(function()
+    if selectMode=="source" then stopSelect(); setStatus("Idle.",COLORS.SUB) else startSelect("source") end
+end)
+tgtBtn.MouseButton1Click:Connect(function()
+    if selectMode=="target" then stopSelect(); setStatus("Idle.",COLORS.SUB) else startSelect("target") end
+end)
+ClearBtn.MouseButton1Click:Connect(function()
+    srcList={}; tgtPool={}; srcNameLbl.Text="None Selected"; tgtNameLbl.Text="None Selected"
+    stopSelect(); updateUI(); setStatus("Selection cleared.",COLORS.SUB)
+end)
+
+ReplaceBtn.MouseButton1Click:Connect(function()
+    if #srcList==0 or #tgtPool==0 then setStatus("Select Source & Target first!",COLORS.DANGER); return end
+    ReplaceBtn.Text="PROCESSING..."; tween(ReplaceBtn,{BackgroundColor3=COLORS.WARNING})
+    local tgtSet,toReplace={},{}
+    for _,t in ipairs(tgtPool) do tgtSet[t]=true end
+    for _,s in ipairs(srcList) do if s and s.Parent and not tgtSet[s] then table.insert(toReplace,s) end end
+    if #toReplace==0 then
+        setStatus("Source objects no longer exist.",COLORS.DANGER)
+        ReplaceBtn.Text="REPLACE 0 OBJECTS"; tween(ReplaceBtn,{BackgroundColor3=COLORS.ACCENT}); return
+    end
+    task.spawn(function()
+        local ok,fail=0,0
+        for i,old in ipairs(toReplace) do
+            local success=pcall(function()
+                local chosen=tgtPool[math.random(1,#tgtPool)]
+                local oldCenter=getAABBCenter(old)
+                local newClone=chosen:Clone(); newClone.Name=chosen.Name
+                scaleToMatch(newClone,old); newClone.Parent=old.Parent
+                moveToPosition(newClone,oldCenter); old:Destroy()
+            end)
+            if success then ok=ok+1 else fail=fail+1 end
+            if i%10==0 then RunService.Heartbeat:Wait() end
+        end
+        tween(ReplaceBtn,{BackgroundColor3=COLORS.ACCENT})
+        ReplaceBtn.Text="REPLACE "..tostring(#srcList).." OBJECTS"
+        if fail==0 then setStatus("Success! "..ok.." items replaced.",COLORS.SUCCESS)
+        else setStatus("Done: "..ok.." OK, "..fail.." FAILED.",COLORS.WARNING) end
+        srcList={}; srcNameLbl.Text="None Selected"; updateUI()
+    end)
+end)
+
+local dragging,dragStart,dragStartPos=false,nil,nil
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        dragging=true; dragStart=input.Position; dragStartPos=Main.Position
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+        local delta=input.Position-dragStart
+        Main.Position=UDim2.new(dragStartPos.X.Scale,dragStartPos.X.Offset+delta.X,dragStartPos.Y.Scale,dragStartPos.Y.Offset+delta.Y)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then dragging=false end
+end)
+
+updateUI()
+print("[FORKT Engine] Replace Obstacle loaded | by sl allzzsky")
